@@ -1,0 +1,16 @@
+{
+  "price_lists": {
+    "Mayoristas": "2",
+    "Distribuidores": "3",
+    "Distribuidores IVA": "4",
+    "Mayoristas IVA": "5"
+  },
+  "distributor_lists": [
+    "4",
+    "3"
+  ],
+  "mayorista_lists": [
+    "5",
+    "2"
+  ]
+}
