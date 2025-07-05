@@ -2,8 +2,9 @@ name: Alegra daily report
 
 on:
   schedule:
-    # 09:10 a. m. Bogotá, de lunes a sábado
-    - cron: "10 14 * * 1-6"
+    # 07:00 a. m. Bogotá (12:00 UTC), de lunes a sábado
+    - cron: "0 12 * * 1-6"
+  workflow_dispatch:
 
 jobs:
   report:
