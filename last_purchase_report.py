@@ -68,7 +68,9 @@ def fetch_contacts():
     contacts = {}
     for c in paginate("contacts"):
         cid = c["id"]
-        price_id = str(c.get("priceList", {}).get("id"))
+        # Manejo seguro del priceList que puede ser None
+        price_list = c.get("priceList") or {}
+        price_id = str(price_list.get("id", "")) if price_list.get("id") is not None else None
         contacts[cid] = price_id
     return contacts
 
