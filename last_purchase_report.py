@@ -231,11 +231,10 @@ def save_to_supabase(df):
             if 'fecha_ultima_compra' in record:
                 record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
             
-            # Remover campos problemáticos o convertir strings vacíos a None
+            # Remover campos problemáticos
             for key in ['created_at', 'updated_at', 'id']:
                 if key in record:
-                    if record[key] == '' or pd.isna(record[key]):
-                        record[key] = None
+                    del record[key]
         
         # Hacer UPSERT en lotes
         batch_size = 100
@@ -248,7 +247,7 @@ def save_to_supabase(df):
     except Exception as e:
         print(f"❌ Error guardando en Supabase: {e}")
         raise
-    
+        
 def build_report(contacts, sales_list, df_prev=None):
     """Construye el reporte final"""
     
