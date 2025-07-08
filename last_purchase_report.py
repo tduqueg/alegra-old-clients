@@ -221,19 +221,32 @@ def build_report(contacts, sales_list, df_prev=None):
     today = datetime.now(LOCAL_TZ).date()
     rows = []
     
+    # DEBUG: Contador para entender qué está pasando
+    total_clients_with_sales = len(last_purchase)
+    clients_in_contacts = 0
+    clients_with_category = 0
+    
+    print(f"🔍 DEBUG: {total_clients_with_sales} clientes con ventas")
+    
     # Procesar solo clientes que tienen ventas y pertenecen a categorías relevantes
     for client_id, last_date in last_purchase.items():
         if client_id not in contacts:
             continue
-            
+        
+        clients_in_contacts += 1
         contact_info = contacts[client_id]
         price_id = contact_info["price_id"]
         categoria = category_from_price(price_id)
+        
+        # DEBUG: Mostrar algunos ejemplos
+        if clients_in_contacts <= 5:  # Solo los primeros 5 para no saturar
+            print(f"🔍 Cliente {client_id}: price_id={price_id}, categoria={categoria}")
         
         # Solo incluir Distribuidores y Mayoristas
         if not categoria:
             continue
             
+        clients_with_category += 1
         last_dt = datetime.fromisoformat(last_date).date()
         rows.append({
             "cliente_id": client_id,
@@ -244,6 +257,10 @@ def build_report(contacts, sales_list, df_prev=None):
             "fecha_ultima_compra": last_dt,
             "dias_sin_compra": (today - last_dt).days,
         })
+    
+    print(f"🔍 DEBUG: {clients_in_contacts} clientes encontrados en contactos")
+    print(f"🔍 DEBUG: {clients_with_category} clientes con categoría válida")
+    print(f"🔍 DEBUG: {len(rows)} filas creadas para el reporte")
 
     df_new = pd.DataFrame(rows)
     
@@ -258,6 +275,17 @@ def build_report(contacts, sales_list, df_prev=None):
                .drop_duplicates("cliente_id", keep="last")
     else:
         df = df_new
+    
+    # CORRECCIÓN: Verificar si el DataFrame está vacío antes de hacer sort_values
+    if df.empty:
+        print("⚠️  No se encontraron clientes de las categorías Distribuidores o Mayoristas")
+        # Crear DataFrame vacío con las columnas esperadas
+        df = pd.DataFrame(columns=[
+            "cliente_id", "cliente_nombre", "cliente_email", 
+            "categoria", "lista_precio_id", "fecha_ultima_compra", 
+            "dias_sin_compra"
+        ])
+        return df
     
     return df.sort_values("dias_sin_compra", ascending=False)
 
