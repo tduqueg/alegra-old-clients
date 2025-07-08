@@ -11,9 +11,13 @@ on:
         required: false
         default: 'false'
       max_items:
-        description: 'Máximo registros en test'
+        description: 'Máximo registros en test (ventas)'
         required: false
-        default: '20'
+        default: '100'
+      max_contacts:
+        description: 'Máximo contactos en test'
+        required: false
+        default: '500'
 
 jobs:
   report:
@@ -27,7 +31,8 @@ jobs:
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       # Testing
       TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
-      TEST_MAX_ITEMS: ${{ github.event.inputs.max_items || '20' }}
+      TEST_MAX_ITEMS: ${{ github.event.inputs.max_items || '100' }}
+      TEST_MAX_CONTACTS: ${{ github.event.inputs.max_contacts || '500' }}
       
     steps:
       - uses: actions/checkout@v4
