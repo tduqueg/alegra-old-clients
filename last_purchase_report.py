@@ -39,6 +39,11 @@ def paginate(endpoint, params=None):
     params = params or {}
     params.update({"limit": 30, "start": 0})
     
+    # MODO TESTING: solo obtener pocos registros
+    TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+    max_items = int(os.getenv("TEST_MAX_ITEMS", "20")) if TEST_MODE else float('inf')
+    count = 0
+    
     while True:
         print(f"Obteniendo {endpoint} - página {params['start']//30 + 1}")
         try:
@@ -52,6 +57,10 @@ def paginate(endpoint, params=None):
                 
             for item in batch:
                 yield item
+                count += 1
+                if TEST_MODE and count >= max_items:
+                    print(f"🧪 MODO TEST: Limitado a {max_items} registros")
+                    return
                 
             if len(batch) < 30:
                 break
@@ -177,14 +186,11 @@ def category_from_price(price_id: str | None):
 # ----------------------------------------------------- construcción DF —
 
 def save_to_supabase(df):
-    """Guardar DataFrame en Supabase"""
+    """Guardar DataFrame en Supabase (APPEND, no overwrite)"""
     try:
         supabase = get_supabase_client()
         
-        # Limpiar tabla existente
-        supabase.table("clients_last_purchase").delete().neq("cliente_id", "").execute()
-        
-        # Convertir DataFrame a lista de diccionarios
+        # NO limpiar tabla - solo hacer UPSERT
         records = df.to_dict('records')
         
         # Convertir fechas a string ISO
@@ -192,13 +198,13 @@ def save_to_supabase(df):
             if 'fecha_ultima_compra' in record:
                 record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
         
-        # Insertar en lotes de 100
+        # Hacer UPSERT (insert o update si existe)
         batch_size = 100
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            supabase.table("clients_last_purchase").insert(batch).execute()
+            supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
         
-        print(f"✓ {len(records)} registros guardados en Supabase")
+        print(f"✓ {len(records)} registros guardados/actualizados en Supabase")
         
     except Exception as e:
         print(f"Error guardando en Supabase: {e}")
