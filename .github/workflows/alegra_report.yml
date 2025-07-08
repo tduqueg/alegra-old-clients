@@ -1,8 +1,8 @@
-name: Alegra daily report
+name: Alegra daily report (Supabase)
 
 on:
   schedule:
-    # 07:00 a. m. Bogotá (12:00 UTC), de lunes a sábado
+    # 07:00 a. m. Bogotá (12:00 UTC), de lunes a sábado
     - cron: "0 12 * * 1-6"
   workflow_dispatch:
 
@@ -10,8 +10,13 @@ jobs:
   report:
     runs-on: ubuntu-latest
     env:
+      # Alegra API
       ALEGRA_API_EMAIL: ${{ secrets.ALEGRA_API_EMAIL }}
       ALEGRA_API_TOKEN: ${{ secrets.ALEGRA_API_TOKEN }}
+      # Supabase
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      
     steps:
       - uses: actions/checkout@v4
 
@@ -19,20 +24,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        run: python -m pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Build / update report
+      - name: Run Alegra report
         run: python last_purchase_report.py
 
-      - name: Commit updated CSV + state
-        run: |
-          git config user.name  "github-actions"
-          git config user.email "actions@github.com"
-          git add clients_last_purchase.csv state.json
-          if git diff --cached --quiet; then
-            echo "Sin cambios que commitear"
-          else
-            git commit -m "chore: daily Alegra report"
-            git push
-          fi
+      - name: Report completion
+        run: echo "✅ Reporte completado y guardado en Supabase"
