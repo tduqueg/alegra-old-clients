@@ -163,7 +163,18 @@ def fetch_sales(since: date | None):
     print("Obteniendo facturas...")
     for inv in paginate("invoices", params=params):
         client_id = str(inv["client"]["id"])
-        sales.append((client_id, inv["date"]))
+        
+        # MEJORA: Obtener priceList de la venta si existe
+        price_list_id = None
+        if "priceList" in inv and inv["priceList"]:
+            price_list_id = str(inv["priceList"]["id"])
+        
+        sales.append({
+            "client_id": client_id,
+            "date": inv["date"],
+            "price_list_id": price_list_id,
+            "type": "invoice"
+        })
         invoice_count += 1
     
     print(f"✓ Obtenidas {invoice_count} facturas")
@@ -173,14 +184,24 @@ def fetch_sales(since: date | None):
     print("Obteniendo remisiones...")
     for rem in paginate("remissions", params=params):
         client_id = str(rem["client"]["id"])
-        sales.append((client_id, rem["date"]))
+        
+
+        price_list_id = None
+        if "priceList" in rem and rem["priceList"]:
+            price_list_id = str(rem["priceList"]["id"])
+        
+        sales.append({
+            "client_id": client_id,
+            "date": rem["date"],
+            "price_list_id": price_list_id,
+            "type": "remission"
+        })
         remission_count += 1
     
     print(f"✓ Obtenidas {remission_count} remisiones")
     print(f"✓ Total ventas: {len(sales)}")
     
     return sales
-
 # ----------------------------------------------------- categorización —
 
 def category_from_price(price_id: str | None):
@@ -219,11 +240,18 @@ def save_to_supabase(df):
 def build_report(contacts, sales_list, df_prev=None):
     """Construye el reporte final"""
     
-    # Calcular última fecha de compra por cliente
+    # MEJORA: Calcular última fecha de compra por cliente Y su priceList más reciente
     last_purchase = {}
-    for client_id, sale_date in sales_list:
-        if client_id not in last_purchase or sale_date > last_purchase[client_id]:
-            last_purchase[client_id] = sale_date
+    for sale in sales_list:
+        client_id = sale["client_id"]
+        sale_date = sale["date"]
+        price_list_id = sale["price_list_id"]
+        
+        if client_id not in last_purchase or sale_date > last_purchase[client_id]["date"]:
+            last_purchase[client_id] = {
+                "date": sale_date,
+                "price_list_id": price_list_id
+            }
 
     today = datetime.now(LOCAL_TZ).date()
     rows = []
@@ -232,32 +260,37 @@ def build_report(contacts, sales_list, df_prev=None):
     total_clients_with_sales = len(last_purchase)
     clients_in_contacts = 0
     clients_with_category = 0
+    clients_with_sale_price = 0
     
     print(f"🔍 DEBUG: {total_clients_with_sales} clientes con ventas")
     print(f"🔍 DEBUG: {len(contacts)} contactos cargados")
     
-    # DEBUG: Mostrar algunos IDs de clientes con ventas vs contactos
-    sales_client_ids = set(last_purchase.keys())
-    contact_ids = set(contacts.keys())
-    missing_contacts = sales_client_ids - contact_ids
-    
-    if missing_contacts:
-        print(f"🔍 DEBUG: {len(missing_contacts)} clientes con ventas NO están en contactos")
-        print(f"🔍 DEBUG: Primeros 10 IDs faltantes: {list(missing_contacts)[:10]}")
-    
-    # Procesar solo clientes que tienen ventas y pertenecen a categorías relevantes
-    for client_id, last_date in last_purchase.items():
-        if client_id not in contacts:
-            continue
+    # Procesar solo clientes que tienen ventas
+    for client_id, purchase_info in last_purchase.items():
+        last_date = purchase_info["date"]
+        sale_price_id = purchase_info["price_list_id"]
         
-        clients_in_contacts += 1
-        contact_info = contacts[client_id]
-        price_id = contact_info["price_id"]
+        # Obtener información del contacto (nombre, email, etc.)
+        contact_info = contacts.get(client_id, {
+            "name": f"Cliente {client_id}",
+            "email": "",
+            "price_id": None
+        })
+        
+        if client_id in contacts:
+            clients_in_contacts += 1
+        
+        # MEJORA: Prioridad al priceList de la venta, fallback al del contacto
+        price_id = sale_price_id if sale_price_id else contact_info.get("price_id")
+        
+        if sale_price_id:
+            clients_with_sale_price += 1
+        
         categoria = category_from_price(price_id)
         
         # DEBUG: Mostrar algunos ejemplos
-        if clients_in_contacts <= 5:  # Solo los primeros 5 para no saturar
-            print(f"🔍 Cliente {client_id}: price_id={price_id}, categoria={categoria}")
+        if len(rows) < 5:  # Solo los primeros 5 para no saturar
+            print(f"🔍 Cliente {client_id}: contact_price={contact_info.get('price_id')}, sale_price={sale_price_id}, final_price={price_id}, categoria={categoria}")
         
         # Solo incluir Distribuidores y Mayoristas
         if not categoria:
@@ -267,8 +300,8 @@ def build_report(contacts, sales_list, df_prev=None):
         last_dt = datetime.fromisoformat(last_date).date()
         rows.append({
             "cliente_id": client_id,
-            "cliente_nombre": contact_info["name"],
-            "cliente_email": contact_info["email"],
+            "cliente_nombre": contact_info.get("name", f"Cliente {client_id}"),
+            "cliente_email": contact_info.get("email", ""),
             "categoria": categoria,
             "lista_precio_id": price_id,
             "fecha_ultima_compra": last_dt,
@@ -276,6 +309,7 @@ def build_report(contacts, sales_list, df_prev=None):
         })
     
     print(f"🔍 DEBUG: {clients_in_contacts} clientes encontrados en contactos")
+    print(f"🔍 DEBUG: {clients_with_sale_price} clientes con priceList en ventas")
     print(f"🔍 DEBUG: {clients_with_category} clientes con categoría válida")
     print(f"🔍 DEBUG: {len(rows)} filas creadas para el reporte")
 
@@ -293,7 +327,7 @@ def build_report(contacts, sales_list, df_prev=None):
     else:
         df = df_new
     
-    # CORRECCIÓN: Verificar si el DataFrame está vacío antes de hacer sort_values
+    # Verificar si el DataFrame está vacío antes de hacer sort_values
     if df.empty:
         print("⚠️  No se encontraron clientes de las categorías Distribuidores o Mayoristas")
         # Crear DataFrame vacío con las columnas esperadas
@@ -328,6 +362,27 @@ def main():
 
     # 3) construir reporte
     print(f"\n📊 Construyendo reporte...")
+    df_prev = existing_data()def main():
+    print("🚀 Iniciando reporte de Alegra con Supabase...")
+    
+    # 1) cargar estado
+    state = load_state()
+    since = None
+    if state["last_sync"]:
+        since = datetime.fromisoformat(state["last_sync"]).date() + timedelta(days=1)
+        print(f"📅 Sincronizando desde: {since}")
+    else:
+        print("📅 Primera sincronización completa")
+
+    # 2) descargar data
+    print("\n📞 Obteniendo contactos...")
+    contacts = fetch_contacts()
+    
+    print(f"\n🛒 Obteniendo ventas...")
+    sales_list = fetch_sales(since)
+
+    # 3) construir reporte
+    print(f"\n📊 Construyendo reporte...")
     df_prev = existing_data()
     report = build_report(contacts, sales_list, df_prev)
     
@@ -339,13 +394,13 @@ def main():
     
     print(f"\n✅ Reporte actualizado")
     print(f"   • {len(report)} clientes en total")
-    print(f"   • Distribuidores: {len(report[report['categoria'] == 'Distribuidores'])}")
-    print(f"   • Mayoristas: {len(report[report['categoria'] == 'Mayoristas'])}")
-    
-    # Mostrar algunos stats
     if not report.empty:
+        print(f"   • Distribuidores: {len(report[report['categoria'] == 'Distribuidores'])}")
+        print(f"   • Mayoristas: {len(report[report['categoria'] == 'Mayoristas'])}")
         print(f"   • Cliente más antiguo sin compras: {report['dias_sin_compra'].max()} días")
         print(f"   • Cliente más reciente: {report['dias_sin_compra'].min()} días")
+    else:
+        print("   • No hay clientes para mostrar estadísticas")
 
 if __name__ == "__main__":
     main()
