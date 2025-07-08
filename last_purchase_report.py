@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Versión con Supabase para almacenar los datos
+Versión optimizada que solo procesa ventas nuevas
 """
 
 import os, json, requests, pandas as pd
@@ -40,13 +40,11 @@ def paginate(endpoint, params=None):
     params = params or {}
     params.update({"limit": 30, "start": 0})
     
-    # CORRECCIÓN: Diferentes límites para diferentes endpoints
     TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
     
-    # En modo test, usar límites más altos para contactos
     if TEST_MODE:
         if endpoint == "contacts":
-            max_items = int(os.getenv("TEST_MAX_CONTACTS", "500"))  # Más contactos
+            max_items = int(os.getenv("TEST_MAX_CONTACTS", "500"))
         else:
             max_items = int(os.getenv("TEST_MAX_ITEMS", "100"))
     else:
@@ -81,6 +79,7 @@ def paginate(endpoint, params=None):
         except requests.exceptions.RequestException as e:
             print(f"Error en la petición: {e}")
             break
+
 # ----------------------------------------------------------- manejo estado —
 
 def save_state(sync_date: date):
@@ -88,10 +87,8 @@ def save_state(sync_date: date):
     try:
         supabase = get_supabase_client()
         
-        # CORRECCIÓN: Usar upsert en lugar de delete + insert
-        # Esto evita el error de DELETE sin WHERE clause
         supabase.table("sync_state").upsert({
-            "id": 1,  # Usar un ID fijo para el único registro de estado
+            "id": 1,
             "last_sync": sync_date.isoformat(),
             "updated_at": datetime.now(LOCAL_TZ).isoformat()
         }, on_conflict="id").execute()
@@ -113,20 +110,49 @@ def load_state():
         print(f"Error cargando estado: {e}")
         return {"last_sync": None}
 
-def existing_data():
-    """Cargar datos existentes desde Supabase"""
+def get_existing_sales_ids():
+    """Obtener IDs de ventas ya procesadas"""
     try:
         supabase = get_supabase_client()
-        result = supabase.table("clients_last_purchase").select("*").execute()
+        result = supabase.table("sales_processed").select("sale_id, sale_type").execute()
         
-        if result.data:
-            df = pd.DataFrame(result.data)
-            df["fecha_ultima_compra"] = pd.to_datetime(df["fecha_ultima_compra"])
-            return df
-        return None
+        existing = set()
+        for row in result.data:
+            existing.add(f"{row['sale_id']}_{row['sale_type']}")
+        
+        return existing
     except Exception as e:
-        print(f"Error cargando datos existentes: {e}")
-        return None
+        print(f"Error obteniendo ventas existentes: {e}")
+        return set()
+
+def save_new_sales(sales_list):
+    """Guardar nuevas ventas en la tabla sales_processed"""
+    try:
+        supabase = get_supabase_client()
+        
+        if not sales_list:
+            return
+        
+        records = []
+        for sale in sales_list:
+            records.append({
+                "sale_id": str(sale["sale_id"]),
+                "sale_type": sale["type"],
+                "client_id": str(sale["client_id"]),
+                "sale_date": sale["date"],
+                "price_list_id": sale["price_list_id"]
+            })
+        
+        # Insertar en lotes
+        batch_size = 100
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            supabase.table("sales_processed").upsert(batch, on_conflict="sale_id,sale_type").execute()
+        
+        print(f"✓ {len(records)} ventas guardadas en sales_processed")
+        
+    except Exception as e:
+        print(f"Error guardando ventas: {e}")
 
 # ------------------------------------------------------------- extracción —
 
@@ -137,7 +163,7 @@ def fetch_contacts():
     
     for c in paginate("contacts"):
         contact_count += 1
-        cid = c["id"]  # Mantener como número
+        cid = c["id"]
         
         price_list = c.get("priceList") or {}
         price_id = str(price_list.get("id", "")) if price_list.get("id") is not None else None
@@ -151,56 +177,96 @@ def fetch_contacts():
     print(f"✓ Obtenidos {contact_count} contactos")
     return contacts
 
-def fetch_sales(since: date | None):
-    """Obtiene todas las ventas (facturas y remisiones) desde una fecha"""
+def fetch_new_sales(since: date | None):
+    """Obtiene solo las ventas nuevas"""
+    # Obtener IDs de ventas ya procesadas
+    existing_ids = get_existing_sales_ids()
+    print(f"✓ {len(existing_ids)} ventas ya procesadas")
+    
     sales = []
+    new_count = 0
     
     params = {}
     if since:
         params["date[from]"] = since.isoformat()
     
     # Facturas
-    invoice_count = 0
-    print("Obteniendo facturas...")
+    print("Obteniendo facturas nuevas...")
     for inv in paginate("invoices", params=params):
-        client_id = inv["client"]["id"]  # Mantener como número
+        sale_key = f"{inv['id']}_invoice"
         
-        price_list_id = None
-        if "priceList" in inv and inv["priceList"]:
-            price_list_id = str(inv["priceList"]["id"])
-        
-        sales.append({
-            "client_id": client_id,
-            "date": inv["date"],
-            "price_list_id": price_list_id,
-            "type": "invoice"
-        })
-        invoice_count += 1
+        # Solo procesar si es nueva
+        if sale_key not in existing_ids:
+            client_id = inv["client"]["id"]
+            
+            price_list_id = None
+            if "priceList" in inv and inv["priceList"]:
+                price_list_id = str(inv["priceList"]["id"])
+            
+            sales.append({
+                "sale_id": inv["id"],
+                "client_id": client_id,
+                "date": inv["date"],
+                "price_list_id": price_list_id,
+                "type": "invoice"
+            })
+            new_count += 1
     
-    print(f"✓ Obtenidas {invoice_count} facturas")
+    print(f"✓ {new_count} facturas nuevas")
     
     # Remisiones
-    remission_count = 0
-    print("Obteniendo remisiones...")
+    remission_new_count = 0
+    print("Obteniendo remisiones nuevas...")
     for rem in paginate("remissions", params=params):
-        client_id = rem["client"]["id"]  # Mantener como número
+        sale_key = f"{rem['id']}_remission"
         
-        price_list_id = None
-        if "priceList" in rem and rem["priceList"]:
-            price_list_id = str(rem["priceList"]["id"])
-        
-        sales.append({
-            "client_id": client_id,
-            "date": rem["date"],
-            "price_list_id": price_list_id,
-            "type": "remission"
-        })
-        remission_count += 1
+        # Solo procesar si es nueva
+        if sale_key not in existing_ids:
+            client_id = rem["client"]["id"]
+            
+            price_list_id = None
+            if "priceList" in rem and rem["priceList"]:
+                price_list_id = str(rem["priceList"]["id"])
+            
+            sales.append({
+                "sale_id": rem["id"],
+                "client_id": client_id,
+                "date": rem["date"],
+                "price_list_id": price_list_id,
+                "type": "remission"
+            })
+            remission_new_count += 1
     
-    print(f"✓ Obtenidas {remission_count} remisiones")
-    print(f"✓ Total ventas: {len(sales)}")
+    print(f"✓ {remission_new_count} remisiones nuevas")
+    print(f"✓ Total ventas nuevas: {len(sales)}")
     
     return sales
+
+def get_last_purchases_from_db():
+    """Obtener últimas compras desde la base de datos"""
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("sales_processed").select(
+            "client_id, sale_date, price_list_id"
+        ).order("sale_date", desc=True).execute()
+        
+        last_purchases = {}
+        for row in result.data:
+            client_id = int(row["client_id"])
+            sale_date = row["sale_date"]
+            
+            if client_id not in last_purchases or sale_date > last_purchases[client_id]["date"]:
+                last_purchases[client_id] = {
+                    "date": sale_date,
+                    "price_list_id": row["price_list_id"]
+                }
+        
+        return last_purchases
+        
+    except Exception as e:
+        print(f"Error obteniendo últimas compras: {e}")
+        return {}
+
 # ----------------------------------------------------- categorización —
 
 def category_from_price(price_id: str | None):
@@ -225,11 +291,9 @@ def save_to_supabase(df):
         
         # Limpiar registros
         for record in records:
-            # Convertir fechas a string ISO
             if 'fecha_ultima_compra' in record:
                 record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
             
-            # Remover campos problemáticos
             for key in ['created_at', 'updated_at', 'id']:
                 if key in record:
                     del record[key]
@@ -245,47 +309,47 @@ def save_to_supabase(df):
     except Exception as e:
         print(f"❌ Error guardando en Supabase: {e}")
         raise
-        
-def build_report(contacts, sales_list, df_prev=None):
-    """Construye el reporte final"""
+
+def update_client_reports(contacts, new_sales):
+    """Actualizar solo los reportes de clientes con ventas nuevas"""
     
-    # Calcular última fecha de compra por cliente
-    last_purchase = {}
-    for sale in sales_list:
+    # Obtener todas las últimas compras desde la DB
+    all_last_purchases = get_last_purchases_from_db()
+    
+    # Procesar solo ventas nuevas para actualizar últimas compras
+    for sale in new_sales:
         client_id = sale["client_id"]
         sale_date = sale["date"]
         price_list_id = sale["price_list_id"]
         
-        if client_id not in last_purchase or sale_date > last_purchase[client_id]["date"]:
-            last_purchase[client_id] = {
+        if client_id not in all_last_purchases or sale_date > all_last_purchases[client_id]["date"]:
+            all_last_purchases[client_id] = {
                 "date": sale_date,
                 "price_list_id": price_list_id
             }
-
-    today = datetime.now(LOCAL_TZ).date()
-    rows = []
     
-    # Procesar solo clientes que tienen ventas
-    for client_id, purchase_info in last_purchase.items():
-        last_date = purchase_info["date"]
-        sale_price_id = purchase_info["price_list_id"]
-        
-        # Obtener información del contacto
+    # Construir reporte solo para clientes afectados
+    today = datetime.now(LOCAL_TZ).date()
+    updated_clients = set(sale["client_id"] for sale in new_sales)
+    
+    rows = []
+    for client_id in updated_clients:
+        if client_id not in all_last_purchases:
+            continue
+            
+        purchase_info = all_last_purchases[client_id]
         contact_info = contacts.get(client_id, {})
         
         if not contact_info:
-            print(f"⚠️  Cliente {client_id} no encontrado en contactos")
             continue
         
-        # Prioridad al priceList de la venta, fallback al del contacto
-        price_id = sale_price_id if sale_price_id else contact_info.get("price_id")
+        price_id = purchase_info["price_list_id"] or contact_info.get("price_id")
         categoria = category_from_price(price_id)
         
-        # Solo incluir Distribuidores y Mayoristas
         if not categoria:
             continue
         
-        last_dt = datetime.fromisoformat(last_date).date()
+        last_dt = datetime.fromisoformat(purchase_info["date"]).date()
         rows.append({
             "cliente_id": str(client_id),
             "cliente_nombre": contact_info.get("name", ""),
@@ -295,73 +359,52 @@ def build_report(contacts, sales_list, df_prev=None):
             "fecha_ultima_compra": last_dt,
             "dias_sin_compra": (today - last_dt).days,
         })
-
-    df_new = pd.DataFrame(rows)
     
-    # Combinar con datos previos si existen
-    if df_prev is not None and not df_prev.empty:
-        for col in df_new.columns:
-            if col not in df_prev.columns:
-                df_prev[col] = ""
-        
-        df = pd.concat([df_prev, df_new], ignore_index=True) \
-               .drop_duplicates("cliente_id", keep="last")
+    if rows:
+        df_updated = pd.DataFrame(rows)
+        save_to_supabase(df_updated)
+        print(f"✅ Actualizados {len(rows)} clientes")
     else:
-        df = df_new
-    
-    if df.empty:
-        print("⚠️  No se encontraron clientes de las categorías Distribuidores o Mayoristas")
-        df = pd.DataFrame(columns=[
-            "cliente_id", "cliente_nombre", "cliente_email", 
-            "categoria", "lista_precio_id", "fecha_ultima_compra", 
-            "dias_sin_compra"
-        ])
-        return df
-    
-    return df.sort_values("dias_sin_compra", ascending=False)
+        print("ℹ️  No hay clientes para actualizar")
+
 # ---------------------------------------------------------------- main —
 
 def main():
-    print("🚀 Iniciando reporte de Alegra con Supabase...")
+    print("🚀 Iniciando reporte optimizado de Alegra...")
 
-    # 1) cargar estado
+    # 1) Cargar estado
     state = load_state()
     since = None
     if state["last_sync"]:
-        since = datetime.fromisoformat(state["last_sync"]).date() + timedelta(days=1)
-        print(f"📅 Sincronizando desde: {since}")
+        since = datetime.fromisoformat(state["last_sync"]).date()
+        print(f"📅 Procesando ventas desde: {since}")
     else:
-        print("📅 Primera sincronización completa")
+        print("📅 Primera sincronización - procesando todas las ventas")
+        since = date(2020, 1, 1)  # Fecha muy antigua para obtener todo
 
-    # 2) descargar data
+    # 2) Obtener contactos
     print("\n📞 Obteniendo contactos...")
     contacts = fetch_contacts()
 
-    print(f"\n🛒 Obteniendo ventas...")
-    sales_list = fetch_sales(since)
+    # 3) Obtener solo ventas nuevas
+    print(f"\n🛒 Obteniendo ventas nuevas...")
+    new_sales = fetch_new_sales(since)
 
-    # 3) construir reporte
-    print(f"\n📊 Construyendo reporte...")
-    df_prev = existing_data()
-    report = build_report(contacts, sales_list, df_prev)
+    if new_sales:
+        # 4) Guardar ventas nuevas
+        save_new_sales(new_sales)
+        
+        # 5) Actualizar reportes de clientes afectados
+        print(f"\n📊 Actualizando reportes de clientes...")
+        update_client_reports(contacts, new_sales)
+    else:
+        print("ℹ️  No hay ventas nuevas para procesar")
 
-    # 4) guardar en Supabase
-    save_to_supabase(report)
-
-    # 5) persistir fecha de sincronización
+    # 6) Actualizar estado
     save_state(datetime.now(LOCAL_TZ).date())
 
-    print(f"\n✅ Reporte actualizado")
-    print(f"   • {len(report)} clientes en total")
-    if not report.empty:
-        print(f"   • Distribuidores: {len(report[report['categoria'] == 'Distribuidores'])}")
-        print(f"   • Mayoristas: {len(report[report['categoria'] == 'Mayoristas'])}")
-        print(f"   • Cliente más antiguo sin compras: {report['dias_sin_compra'].max()} días")
-        print(f"   • Cliente más reciente: {report['dias_sin_compra'].min()} días")
-    else:
-        print("   • No hay clientes para mostrar estadísticas")
+    print(f"\n✅ Proceso completado")
+    print(f"   • {len(new_sales)} ventas nuevas procesadas")
 
-
-    
 if __name__ == "__main__":
     main()
