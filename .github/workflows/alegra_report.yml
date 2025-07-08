@@ -5,6 +5,15 @@ on:
     # 07:00 a. m. Bogotá (12:00 UTC), de lunes a sábado
     - cron: "0 12 * * 1-6"
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Modo testing (true/false)'
+        required: false
+        default: 'false'
+      max_items:
+        description: 'Máximo registros en test'
+        required: false
+        default: '20'
 
 jobs:
   report:
@@ -16,6 +25,9 @@ jobs:
       # Supabase
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      # Testing
+      TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+      TEST_MAX_ITEMS: ${{ github.event.inputs.max_items || '20' }}
       
     steps:
       - uses: actions/checkout@v4
