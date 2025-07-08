@@ -1,5 +1,6 @@
 {
   "price_lists": {
+    "General":"1",
     "Mayoristas": "2",
     "Distribuidores": "3",
     "Distribuidores IVA": "4",
