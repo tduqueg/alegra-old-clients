@@ -215,77 +215,41 @@ def category_from_price(price_id: str | None):
 # ----------------------------------------------------- construcción DF —
 
 def save_to_supabase(df):
-    """Guardar DataFrame en Supabase (APPEND, no overwrite)"""
+    """Guardar DataFrame en Supabase"""
     try:
         supabase = get_supabase_client()
         
-        # Verificar si el DataFrame está vacío
         if df.empty:
             print("⚠️  DataFrame vacío, no hay nada que guardar")
             return
         
-        # CORRECCIÓN: Limpiar datos antes de enviar
-        df_clean = df.copy()
+        records = df.to_dict('records')
         
-        # 1. Reemplazar valores NaN/inf en columnas numéricas
-        numeric_columns = df_clean.select_dtypes(include=[np.number]).columns
-        for col in numeric_columns:
-            df_clean[col] = df_clean[col].replace([np.inf, -np.inf], np.nan)
-            df_clean[col] = df_clean[col].fillna(0)  # O el valor por defecto que prefieras
-        
-        # 2. Limpiar strings vacíos o None
-        for col in df_clean.columns:
-            if df_clean[col].dtype == 'object':
-                df_clean[col] = df_clean[col].fillna('')
-        
-        # 3. Convertir a records
-        records = df_clean.to_dict('records')
-        
-        # 4. Convertir fechas a string ISO y validar datos
+        # Limpiar registros
         for record in records:
+            # Convertir fechas a string ISO
             if 'fecha_ultima_compra' in record:
-                if pd.isna(record['fecha_ultima_compra']):
-                    record['fecha_ultima_compra'] = None
-                else:
-                    record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
+                record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
             
-            # Validar que dias_sin_compra sea un número válido
-            if 'dias_sin_compra' in record:
-                if not isinstance(record['dias_sin_compra'], (int, float)) or \
-                   np.isnan(record['dias_sin_compra']) or np.isinf(record['dias_sin_compra']):
-                    record['dias_sin_compra'] = 0
+            # Remover campos problemáticos o convertir strings vacíos a None
+            for key in ['created_at', 'updated_at', 'id']:
+                if key in record:
+                    if record[key] == '' or pd.isna(record[key]):
+                        record[key] = None
         
-        # 5. Debug: mostrar algunos registros
-        print(f"🔍 Primer registro a guardar: {records[0] if records else 'Ninguno'}")
-        
-        # 6. Hacer UPSERT en lotes
+        # Hacer UPSERT en lotes
         batch_size = 100
-        total_saved = 0
-        
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            try:
-                result = supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
-                total_saved += len(batch)
-                print(f"✓ Lote {i//batch_size + 1}: {len(batch)} registros procesados")
-            except Exception as batch_error:
-                print(f"❌ Error en lote {i//batch_size + 1}: {batch_error}")
-                # Intentar guardar registros individuales para identificar el problema
-                for j, record in enumerate(batch):
-                    try:
-                        supabase.table("clients_last_purchase").upsert([record], on_conflict="cliente_id").execute()
-                        total_saved += 1
-                    except Exception as record_error:
-                        print(f"❌ Error en registro {i+j}: {record_error}")
-                        print(f"   Registro problemático: {record}")
+            supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
         
-        print(f"✅ {total_saved} registros guardados/actualizados en Supabase")
+        print(f"✅ {len(records)} registros guardados en Supabase")
         
     except Exception as e:
-        print(f"❌ Error general guardando en Supabase: {e}")
-        import traceback
-        traceback.print_exc()
-def build_report(contacts, sales_list, df_prev=None):
+        print(f"❌ Error guardando en Supabase: {e}")
+        raise
+    
+    def build_report(contacts, sales_list, df_prev=None):
     """Construye el reporte final"""
     
     # MEJORA: Calcular última fecha de compra por cliente Y su priceList más reciente
