@@ -133,15 +133,19 @@ def save_new_sales(sales_list):
         if not sales_list:
             return
         
-        records = []
+        # Eliminar duplicados usando un diccionario
+        unique_sales = {}
         for sale in sales_list:
-            records.append({
+            key = f"{sale['sale_id']}_{sale['type']}"
+            unique_sales[key] = {
                 "sale_id": str(sale["sale_id"]),
                 "sale_type": sale["type"],
                 "client_id": str(sale["client_id"]),
                 "sale_date": sale["date"],
                 "price_list_id": sale["price_list_id"]
-            })
+            }
+        
+        records = list(unique_sales.values())
         
         # Insertar en lotes
         batch_size = 100
@@ -149,7 +153,7 @@ def save_new_sales(sales_list):
             batch = records[i:i + batch_size]
             supabase.table("sales_processed").upsert(batch, on_conflict="sale_id,sale_type").execute()
         
-        print(f"✓ {len(records)} ventas guardadas en sales_processed")
+        print(f"✓ {len(records)} ventas únicas guardadas en sales_processed")
         
     except Exception as e:
         print(f"Error guardando ventas: {e}")
@@ -183,7 +187,8 @@ def fetch_new_sales(since: date | None):
     existing_ids = get_existing_sales_ids()
     print(f"✓ {len(existing_ids)} ventas ya procesadas")
     
-    sales = []
+    # Usar diccionario para evitar duplicados desde el inicio
+    sales_dict = {}
     new_count = 0
     
     params = {}
@@ -195,21 +200,21 @@ def fetch_new_sales(since: date | None):
     for inv in paginate("invoices", params=params):
         sale_key = f"{inv['id']}_invoice"
         
-        # Solo procesar si es nueva
-        if sale_key not in existing_ids:
+        # Solo procesar si es nueva y no duplicada
+        if sale_key not in existing_ids and sale_key not in sales_dict:
             client_id = inv["client"]["id"]
             
             price_list_id = None
             if "priceList" in inv and inv["priceList"]:
                 price_list_id = str(inv["priceList"]["id"])
             
-            sales.append({
+            sales_dict[sale_key] = {
                 "sale_id": inv["id"],
                 "client_id": client_id,
                 "date": inv["date"],
                 "price_list_id": price_list_id,
                 "type": "invoice"
-            })
+            }
             new_count += 1
     
     print(f"✓ {new_count} facturas nuevas")
@@ -220,25 +225,27 @@ def fetch_new_sales(since: date | None):
     for rem in paginate("remissions", params=params):
         sale_key = f"{rem['id']}_remission"
         
-        # Solo procesar si es nueva
-        if sale_key not in existing_ids:
+        # Solo procesar si es nueva y no duplicada
+        if sale_key not in existing_ids and sale_key not in sales_dict:
             client_id = rem["client"]["id"]
             
             price_list_id = None
             if "priceList" in rem and rem["priceList"]:
                 price_list_id = str(rem["priceList"]["id"])
             
-            sales.append({
+            sales_dict[sale_key] = {
                 "sale_id": rem["id"],
                 "client_id": client_id,
                 "date": rem["date"],
                 "price_list_id": price_list_id,
                 "type": "remission"
-            })
+            }
             remission_new_count += 1
     
     print(f"✓ {remission_new_count} remisiones nuevas")
-    print(f"✓ Total ventas nuevas: {len(sales)}")
+    
+    sales = list(sales_dict.values())
+    print(f"✓ Total ventas nuevas (sin duplicados): {len(sales)}")
     
     return sales
 
