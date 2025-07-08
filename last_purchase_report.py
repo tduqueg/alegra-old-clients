@@ -39,9 +39,18 @@ def paginate(endpoint, params=None):
     params = params or {}
     params.update({"limit": 30, "start": 0})
     
-    # MODO TESTING: solo obtener pocos registros
+    # CORRECCIÓN: Diferentes límites para diferentes endpoints
     TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
-    max_items = int(os.getenv("TEST_MAX_ITEMS", "20")) if TEST_MODE else float('inf')
+    
+    # En modo test, usar límites más altos para contactos
+    if TEST_MODE:
+        if endpoint == "contacts":
+            max_items = int(os.getenv("TEST_MAX_CONTACTS", "500"))  # Más contactos
+        else:
+            max_items = int(os.getenv("TEST_MAX_ITEMS", "100"))
+    else:
+        max_items = float('inf')
+    
     count = 0
     
     while True:
@@ -59,7 +68,7 @@ def paginate(endpoint, params=None):
                 yield item
                 count += 1
                 if TEST_MODE and count >= max_items:
-                    print(f"🧪 MODO TEST: Limitado a {max_items} registros")
+                    print(f"🧪 MODO TEST: Limitado a {max_items} registros para {endpoint}")
                     return
                 
             if len(batch) < 30:
@@ -71,14 +80,30 @@ def paginate(endpoint, params=None):
         except requests.exceptions.RequestException as e:
             print(f"Error en la petición: {e}")
             break
-
 # ----------------------------------------------------------- manejo estado —
+
+def save_state(sync_date: date):
+    """Guardar estado en Supabase"""
+    try:
+        supabase = get_supabase_client()
+        
+        # CORRECCIÓN: Usar upsert en lugar de delete + insert
+        # Esto evita el error de DELETE sin WHERE clause
+        supabase.table("sync_state").upsert({
+            "id": 1,  # Usar un ID fijo para el único registro de estado
+            "last_sync": sync_date.isoformat(),
+            "updated_at": datetime.now(LOCAL_TZ).isoformat()
+        }, on_conflict="id").execute()
+        
+        print("✓ Estado guardado en Supabase")
+    except Exception as e:
+        print(f"Error guardando estado: {e}")
 
 def load_state():
     """Cargar estado desde Supabase"""
     try:
         supabase = get_supabase_client()
-        result = supabase.table("sync_state").select("*").limit(1).execute()
+        result = supabase.table("sync_state").select("*").eq("id", 1).execute()
         
         if result.data:
             return result.data[0]
@@ -86,24 +111,6 @@ def load_state():
     except Exception as e:
         print(f"Error cargando estado: {e}")
         return {"last_sync": None}
-
-def save_state(sync_date: date):
-    """Guardar estado en Supabase"""
-    try:
-        supabase = get_supabase_client()
-        
-        # Eliminar registro anterior
-        supabase.table("sync_state").delete().execute()
-        
-        # Insertar nuevo estado
-        supabase.table("sync_state").insert({
-            "last_sync": sync_date.isoformat(),
-            "updated_at": datetime.now(LOCAL_TZ).isoformat()
-        }).execute()
-        
-        print("✓ Estado guardado en Supabase")
-    except Exception as e:
-        print(f"Error guardando estado: {e}")
 
 def existing_data():
     """Cargar datos existentes desde Supabase"""
@@ -227,6 +234,16 @@ def build_report(contacts, sales_list, df_prev=None):
     clients_with_category = 0
     
     print(f"🔍 DEBUG: {total_clients_with_sales} clientes con ventas")
+    print(f"🔍 DEBUG: {len(contacts)} contactos cargados")
+    
+    # DEBUG: Mostrar algunos IDs de clientes con ventas vs contactos
+    sales_client_ids = set(last_purchase.keys())
+    contact_ids = set(contacts.keys())
+    missing_contacts = sales_client_ids - contact_ids
+    
+    if missing_contacts:
+        print(f"🔍 DEBUG: {len(missing_contacts)} clientes con ventas NO están en contactos")
+        print(f"🔍 DEBUG: Primeros 10 IDs faltantes: {list(missing_contacts)[:10]}")
     
     # Procesar solo clientes que tienen ventas y pertenecen a categorías relevantes
     for client_id, last_date in last_purchase.items():
@@ -288,7 +305,6 @@ def build_report(contacts, sales_list, df_prev=None):
         return df
     
     return df.sort_values("dias_sin_compra", ascending=False)
-
 # ---------------------------------------------------------------- main —
 
 def main():
