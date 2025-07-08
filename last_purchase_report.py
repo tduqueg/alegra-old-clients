@@ -319,6 +319,49 @@ def build_report(contacts, sales_list, df_prev=None):
         return df
     
     return df.sort_values("dias_sin_compra", ascending=False)
+# ---------------------------------------------------------------- main —
+
+def main():
+    print("🚀 Iniciando reporte de Alegra con Supabase...")
+
+    # 1) cargar estado
+    state = load_state()
+    since = None
+    if state["last_sync"]:
+        since = datetime.fromisoformat(state["last_sync"]).date() + timedelta(days=1)
+        print(f"📅 Sincronizando desde: {since}")
+    else:
+        print("📅 Primera sincronización completa")
+
+    # 2) descargar data
+    print("\n📞 Obteniendo contactos...")
+    contacts = fetch_contacts()
+
+    print(f"\n🛒 Obteniendo ventas...")
+    sales_list = fetch_sales(since)
+
+    # 3) construir reporte
+    print(f"\n📊 Construyendo reporte...")
+    df_prev = existing_data()
+    report = build_report(contacts, sales_list, df_prev)
+
+    # 4) guardar en Supabase
+    save_to_supabase(report)
+
+    # 5) persistir fecha de sincronización
+    save_state(datetime.now(LOCAL_TZ).date())
+
+    print(f"\n✅ Reporte actualizado")
+    print(f"   • {len(report)} clientes en total")
+    if not report.empty:
+        print(f"   • Distribuidores: {len(report[report['categoria'] == 'Distribuidores'])}")
+        print(f"   • Mayoristas: {len(report[report['categoria'] == 'Mayoristas'])}")
+        print(f"   • Cliente más antiguo sin compras: {report['dias_sin_compra'].max()} días")
+        print(f"   • Cliente más reciente: {report['dias_sin_compra'].min()} días")
+    else:
+        print("   • No hay clientes para mostrar estadísticas")
+
+
     
 if __name__ == "__main__":
     main()
