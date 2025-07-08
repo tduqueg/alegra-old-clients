@@ -249,7 +249,7 @@ def save_to_supabase(df):
         print(f"❌ Error guardando en Supabase: {e}")
         raise
     
-    def build_report(contacts, sales_list, df_prev=None):
+def build_report(contacts, sales_list, df_prev=None):
     """Construye el reporte final"""
     
     # MEJORA: Calcular última fecha de compra por cliente Y su priceList más reciente
