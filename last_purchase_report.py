@@ -4,6 +4,7 @@ Versión con Supabase para almacenar los datos
 """
 
 import os, json, requests, pandas as pd
+import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from dateutil import tz
@@ -218,25 +219,72 @@ def save_to_supabase(df):
     try:
         supabase = get_supabase_client()
         
-        # NO limpiar tabla - solo hacer UPSERT
-        records = df.to_dict('records')
+        # Verificar si el DataFrame está vacío
+        if df.empty:
+            print("⚠️  DataFrame vacío, no hay nada que guardar")
+            return
         
-        # Convertir fechas a string ISO
+        # CORRECCIÓN: Limpiar datos antes de enviar
+        df_clean = df.copy()
+        
+        # 1. Reemplazar valores NaN/inf en columnas numéricas
+        numeric_columns = df_clean.select_dtypes(include=[np.number]).columns
+        for col in numeric_columns:
+            df_clean[col] = df_clean[col].replace([np.inf, -np.inf], np.nan)
+            df_clean[col] = df_clean[col].fillna(0)  # O el valor por defecto que prefieras
+        
+        # 2. Limpiar strings vacíos o None
+        for col in df_clean.columns:
+            if df_clean[col].dtype == 'object':
+                df_clean[col] = df_clean[col].fillna('')
+        
+        # 3. Convertir a records
+        records = df_clean.to_dict('records')
+        
+        # 4. Convertir fechas a string ISO y validar datos
         for record in records:
             if 'fecha_ultima_compra' in record:
-                record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
+                if pd.isna(record['fecha_ultima_compra']):
+                    record['fecha_ultima_compra'] = None
+                else:
+                    record['fecha_ultima_compra'] = record['fecha_ultima_compra'].isoformat()
+            
+            # Validar que dias_sin_compra sea un número válido
+            if 'dias_sin_compra' in record:
+                if not isinstance(record['dias_sin_compra'], (int, float)) or \
+                   np.isnan(record['dias_sin_compra']) or np.isinf(record['dias_sin_compra']):
+                    record['dias_sin_compra'] = 0
         
-        # Hacer UPSERT (insert o update si existe)
+        # 5. Debug: mostrar algunos registros
+        print(f"🔍 Primer registro a guardar: {records[0] if records else 'Ninguno'}")
+        
+        # 6. Hacer UPSERT en lotes
         batch_size = 100
+        total_saved = 0
+        
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
+            try:
+                result = supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
+                total_saved += len(batch)
+                print(f"✓ Lote {i//batch_size + 1}: {len(batch)} registros procesados")
+            except Exception as batch_error:
+                print(f"❌ Error en lote {i//batch_size + 1}: {batch_error}")
+                # Intentar guardar registros individuales para identificar el problema
+                for j, record in enumerate(batch):
+                    try:
+                        supabase.table("clients_last_purchase").upsert([record], on_conflict="cliente_id").execute()
+                        total_saved += 1
+                    except Exception as record_error:
+                        print(f"❌ Error en registro {i+j}: {record_error}")
+                        print(f"   Registro problemático: {record}")
         
-        print(f"✓ {len(records)} registros guardados/actualizados en Supabase")
+        print(f"✅ {total_saved} registros guardados/actualizados en Supabase")
         
     except Exception as e:
-        print(f"Error guardando en Supabase: {e}")
-
+        print(f"❌ Error general guardando en Supabase: {e}")
+        import traceback
+        traceback.print_exc()
 def build_report(contacts, sales_list, df_prev=None):
     """Construye el reporte final"""
     
