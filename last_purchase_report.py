@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Versión optimizada con filtros de ubicación y tiempo
+Incluye opción de rebuild completo (truncate + reload)
 """
 
 import os, json, requests, pandas as pd
@@ -9,6 +10,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, date
 from dateutil import tz
 import time
+import argparse
 from supabase import create_client, Client
 
 # ------------------------------------------------------------------ config —
@@ -21,11 +23,11 @@ DISTRIBUTOR_SET = set(CONFIG["distributor_lists"])
 MAYORISTA_SET = set(CONFIG["mayorista_lists"])
 
 # Configuración de filtros
-MAX_MONTHS_WITHOUT_PURCHASE = 6  # Máximo 6 meses sin compras
+MAX_MONTHS_WITHOUT_PURCHASE = 6
 LOCATIONS_TO_TRACK = [
     "Bogotá", "Medellín", "Cali", "Barranquilla", "Cartagena",
     "Bucaramanga", "Pereira", "Manizales", "Ibagué", "Neiva"
-]  # Puedes ajustar según tus necesidades
+]
 
 # Configuración de Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -88,6 +90,31 @@ def paginate(endpoint, params=None):
             break
 
 # ----------------------------------------------------------- manejo estado —
+
+def truncate_tables():
+    """Truncar todas las tablas para rebuild completo"""
+    try:
+        supabase = get_supabase_client()
+        
+        print("🗑️  Truncando tablas...")
+        
+        # Truncar tabla de ventas procesadas
+        supabase.table("sales_processed").delete().neq("id", "").execute()
+        print("   ✓ sales_processed truncada")
+        
+        # Truncar tabla de reportes de clientes
+        supabase.table("clients_last_purchase").delete().neq("id", "").execute()
+        print("   ✓ clients_last_purchase truncada")
+        
+        # Resetear estado de sincronización
+        supabase.table("sync_state").delete().neq("id", "").execute()
+        print("   ✓ sync_state reseteado")
+        
+        print("✅ Truncate completado")
+        
+    except Exception as e:
+        print(f"❌ Error en truncate: {e}")
+        raise
 
 def save_state(sync_date: date):
     """Guardar estado en Supabase"""
@@ -172,13 +199,11 @@ def extract_location_info(contact_data):
     city = ""
     state = ""
     
-    # Verificar si hay información de dirección
     if "address" in contact_data and contact_data["address"]:
         address = contact_data["address"]
         city = address.get("city", "")
         state = address.get("state", "")
     
-    # También verificar campos directos
     if not city and "city" in contact_data:
         city = contact_data.get("city", "")
     if not state and "state" in contact_data:
@@ -201,7 +226,6 @@ def fetch_contacts():
         price_list = c.get("priceList") or {}
         price_id = str(price_list.get("id", "")) if price_list.get("id") is not None else None
         
-        # Extraer información de ubicación
         location = extract_location_info(c)
         
         contacts[cid] = {
@@ -215,8 +239,60 @@ def fetch_contacts():
     print(f"✓ Obtenidos {contact_count} contactos")
     return contacts
 
+def fetch_all_sales():
+    """Obtiene TODAS las ventas (para rebuild completo)"""
+    sales_dict = {}
+    
+    # Facturas
+    print("Obteniendo TODAS las facturas...")
+    for inv in paginate("invoices"):
+        sale_key = f"{inv['id']}_invoice"
+        
+        if sale_key not in sales_dict:
+            client_id = int(inv["client"]["id"])
+            price_list_id = None
+            if "priceList" in inv and inv["priceList"]:
+                price_list_id = str(inv["priceList"]["id"])
+
+            sales_dict[sale_key] = {
+                "sale_id": inv["id"],
+                "client_id": client_id,
+                "date": inv["date"],
+                "price_list_id": price_list_id,
+                "type": "invoice"
+            }
+    
+    print(f"✓ {len([s for s in sales_dict.values() if s['type'] == 'invoice'])} facturas obtenidas")
+    
+    # Remisiones
+    print("Obteniendo TODAS las remisiones...")
+    for rem in paginate("remissions"):
+        sale_key = f"{rem['id']}_remission"
+        
+        if sale_key not in sales_dict:
+            client_id = int(rem["client"]["id"])
+            price_list_id = None
+            if "priceList" in rem and rem["priceList"]:
+                price_list_id = str(rem["priceList"]["id"])
+            
+            sales_dict[sale_key] = {
+                "sale_id": rem["id"],
+                "client_id": client_id,
+                "date": rem["date"],
+                "price_list_id": price_list_id,
+                "type": "remission"
+            }
+    
+    total_remissions = len([s for s in sales_dict.values() if s['type'] == 'remission'])
+    print(f"✓ {total_remissions} remisiones obtenidas")
+    
+    sales = list(sales_dict.values())
+    print(f"✓ Total ventas: {len(sales)}")
+    
+    return sales
+
 def fetch_new_sales(since: date | None):
-    """Obtiene solo las ventas nuevas"""
+    """Obtiene solo las ventas nuevas (modo incremental)"""
     existing_ids = get_existing_sales_ids()
     print(f"✓ {len(existing_ids)} ventas ya procesadas")
     
@@ -234,7 +310,6 @@ def fetch_new_sales(since: date | None):
         
         if sale_key not in existing_ids and sale_key not in sales_dict:
             client_id = int(inv["client"]["id"])
-
             price_list_id = None
             if "priceList" in inv and inv["priceList"]:
                 price_list_id = str(inv["priceList"]["id"])
@@ -258,7 +333,6 @@ def fetch_new_sales(since: date | None):
         
         if sale_key not in existing_ids and sale_key not in sales_dict:
             client_id = int(rem["client"]["id"])
-            
             price_list_id = None
             if "priceList" in rem and rem["priceList"]:
                 price_list_id = str(rem["priceList"]["id"])
@@ -275,16 +349,30 @@ def fetch_new_sales(since: date | None):
     print(f"✓ {remission_new_count} remisiones nuevas")
     
     sales = list(sales_dict.values())
-    print(f"✓ Total ventas nuevas (sin duplicados): {len(sales)}")
+    print(f"✓ Total ventas nuevas: {len(sales)}")
     
     return sales
 
+def get_last_purchases_from_sales(sales):
+    """Calcular últimas compras directamente desde las ventas"""
+    last_purchases = {}
+    
+    for sale in sales:
+        client_id = sale["client_id"]
+        sale_date = datetime.fromisoformat(sale["date"]).date()
+        
+        if client_id not in last_purchases or sale_date > last_purchases[client_id]["date"]:
+            last_purchases[client_id] = {
+                "date": sale_date,
+                "price_list_id": sale["price_list_id"]
+            }
+    
+    return last_purchases
+
 def get_last_purchases_from_db():
-    """Obtener últimas compras desde la base de datos, asegurando fechas más recientes"""
+    """Obtener últimas compras desde la base de datos"""
     try:
         supabase = get_supabase_client()
-        
-        # Consulta optimizada para obtener la fecha más reciente por cliente
         result = supabase.table("sales_processed").select(
             "client_id, sale_date, price_list_id"
         ).order("client_id", desc=False).order("sale_date", desc=True).execute()
@@ -294,7 +382,6 @@ def get_last_purchases_from_db():
             client_id = int(row["client_id"])
             sale_date = row["sale_date"]
             
-            # Solo tomar la primera ocurrencia (más reciente) por cliente
             if client_id not in last_purchases:
                 last_purchases[client_id] = {
                     "date": sale_date,
@@ -357,52 +444,66 @@ def save_to_supabase(df):
         print(f"❌ Error guardando en Supabase: {e}")
         raise
 
-def update_client_locations(contacts):
-    """Sincronizar ciudad y estado para los clientes existentes."""
-    try:
-        supabase = get_supabase_client()
-        result = supabase.table("clients_last_purchase").select("cliente_id").execute()
-
-        if not result.data:
-            print("ℹ️  No hay clientes existentes para actualizar ubicación")
-            return
-
-        updated_count = 0
-        for row in result.data:
-            cid = row["cliente_id"]
-            info = contacts.get(int(cid)) or contacts.get(cid)
-            if not info:
-                continue
-
-            # Solo actualizamos las ubicaciones para evitar inserciones
-            supabase.table("clients_last_purchase").update({
-                "cliente_ciudad": info.get("city", ""),
-                "cliente_estado": info.get("state", "")
-            }).eq("cliente_id", str(cid)).execute()
-            updated_count += 1
-
-        if updated_count:
-            print(f"✓ Actualizadas ubicaciones de {updated_count} clientes")
-        else:
-            print("ℹ️  Ninguna ubicación de cliente para actualizar")
-
-    except Exception as e:
-        print(f"Error actualizando ubicaciones: {e}")
+def build_full_report(contacts, all_sales):
+    """Construir reporte completo desde todas las ventas"""
+    print("📊 Construyendo reporte completo...")
+    
+    # Calcular últimas compras
+    last_purchases = get_last_purchases_from_sales(all_sales)
+    
+    today = datetime.now(LOCAL_TZ).date()
+    rows = []
+    filtered_out_count = 0
+    
+    for client_id, purchase_info in last_purchases.items():
+        contact_info = contacts.get(client_id, {})
+        
+        if not contact_info:
+            continue
+        
+        price_id = purchase_info["price_list_id"] or contact_info.get("price_id")
+        categoria = category_from_price(price_id)
+        
+        if not categoria:
+            continue
+        
+        last_dt = purchase_info["date"]
+        days_without_purchase = (today - last_dt).days
+        
+        # Filtrar por timeframe
+        if not is_within_timeframe(last_dt):
+            filtered_out_count += 1
+            continue
+        
+        rows.append({
+            "cliente_id": str(client_id),
+            "cliente_nombre": contact_info.get("name", ""),
+            "cliente_email": contact_info.get("email", ""),
+            "cliente_ciudad": contact_info.get("city", ""),
+            "cliente_estado": contact_info.get("state", ""),
+            "categoria": categoria,
+            "lista_precio_id": price_id,
+            "fecha_ultima_compra": last_dt,
+            "dias_sin_compra": days_without_purchase,
+        })
+    
+    if rows:
+        df = pd.DataFrame(rows)
+        save_to_supabase(df)
+        print(f"✅ Reporte completo creado: {len(rows)} clientes")
+        print(f"🔍 Filtrados {filtered_out_count} clientes con más de {MAX_MONTHS_WITHOUT_PURCHASE} meses sin compras")
+    else:
+        print("⚠️  No hay clientes elegibles para el reporte")
 
 def update_client_reports(contacts, new_sales):
-    """Actualizar reportes de clientes, recalculando desde todas las ventas"""
-    
-    # Obtener todas las últimas compras desde la DB (esto nos da el estado actualizado)
+    """Actualizar reportes de clientes (modo incremental)"""
     all_last_purchases = get_last_purchases_from_db()
-    
-    # Identificar clientes que tuvieron ventas nuevas
     updated_clients = set(sale["client_id"] for sale in new_sales)
     
     if not updated_clients:
         print("ℹ️  No hay clientes para actualizar")
         return
     
-    # Construir reporte solo para clientes con ventas nuevas
     today = datetime.now(LOCAL_TZ).date()
     rows = []
     filtered_out_count = 0
@@ -428,7 +529,6 @@ def update_client_reports(contacts, new_sales):
         last_dt = datetime.fromisoformat(purchase_info["date"]).date()
         days_without_purchase = (today - last_dt).days
         
-        # Filtrar por timeframe (solo incluir clientes que compraron en los últimos X meses)
         if not is_within_timeframe(last_dt):
             filtered_out_count += 1
             continue
@@ -444,10 +544,6 @@ def update_client_reports(contacts, new_sales):
             "fecha_ultima_compra": last_dt,
             "dias_sin_compra": days_without_purchase,
         })
-        
-        # Debug: mostrar algunos casos para verificar
-        if len(rows) <= 3:
-            print(f"  🔍 Cliente {contact_info.get('name', 'N/A')}: última compra {last_dt}, días sin compra: {days_without_purchase}")
     
     if rows:
         df_updated = pd.DataFrame(rows)
@@ -460,51 +556,83 @@ def update_client_reports(contacts, new_sales):
 # ---------------------------------------------------------------- main —
 
 def main():
-    print("🚀 Iniciando reporte optimizado de Alegra...")
-    print(f"📅 Filtrando clientes con máximo {MAX_MONTHS_WITHOUT_PURCHASE} meses sin compras")
-
-    # 1) Cargar estado
-    state = load_state()
-    since = None
-    if state["last_sync"]:
-        since = datetime.fromisoformat(state["last_sync"]).date()
-        print(f"📅 Procesando ventas desde: {since}")
+    parser = argparse.ArgumentParser(description="Reporte de Alegra con opción de rebuild")
+    parser.add_argument("--rebuild", action="store_true", 
+                       help="Hacer rebuild completo (truncate + reload)")
+    
+    args = parser.parse_args()
+    
+    if args.rebuild:
+        print("🔄 MODO REBUILD COMPLETO - Truncando y recargando todas las tablas")
+        
+        # Confirmar acción
+        confirm = input("⚠️  Esto eliminará TODOS los datos existentes. ¿Continuar? (y/N): ")
+        if confirm.lower() != 'y':
+            print("❌ Operación cancelada")
+            return
+        
+        # Truncar tablas
+        truncate_tables()
+        
+        # Obtener contactos
+        print("\n📞 Obteniendo contactos...")
+        contacts = fetch_contacts()
+        
+        # Obtener TODAS las ventas
+        print("\n🛒 Obteniendo todas las ventas...")
+        all_sales = fetch_all_sales()
+        
+        # Guardar todas las ventas
+        print(f"\n💾 Guardando {len(all_sales)} ventas...")
+        save_new_sales(all_sales)
+        
+        # Construir reporte completo
+        print(f"\n📊 Construyendo reporte completo...")
+        build_full_report(contacts, all_sales)
+        
+        # Guardar estado
+        save_state(datetime.now(LOCAL_TZ).date())
+        
+        print(f"\n✅ Rebuild completo finalizado")
+        print(f"   • {len(all_sales)} ventas procesadas")
+        print(f"   • Filtro temporal: {MAX_MONTHS_WITHOUT_PURCHASE} meses máximo")
+        
     else:
-        print("📅 Primera sincronización - procesando todas las ventas")
-        since = date(2020, 1, 1)
+        print("🚀 Iniciando reporte incremental de Alegra...")
+        print(f"📅 Filtrando clientes con máximo {MAX_MONTHS_WITHOUT_PURCHASE} meses sin compras")
 
-    # 2) Obtener contactos con ubicación
-    print("\n📞 Obteniendo contactos con ubicación...")
-    contacts = fetch_contacts()
+        # Modo incremental (código original)
+        state = load_state()
+        since = None
+        if state["last_sync"]:
+            since = datetime.fromisoformat(state["last_sync"]).date()
+            print(f"📅 Procesando ventas desde: {since}")
+        else:
+            print("📅 Primera sincronización - procesando todas las ventas")
+            since = date(2020, 1, 1)
 
-    # 3) Sincronizar ubicaciones con la base de datos
-    print("\n📍 Actualizando ubicaciones de clientes existentes...")
-    update_client_locations(contacts)
+        print("\n📞 Obteniendo contactos con ubicación...")
+        contacts = fetch_contacts()
 
-    # 4) Obtener solo ventas nuevas
-    print(f"\n🛒 Obteniendo ventas nuevas...")
-    new_sales = fetch_new_sales(since)
+        print(f"\n🛒 Obteniendo ventas nuevas...")
+        new_sales = fetch_new_sales(since)
 
-    if new_sales:
-        # 5) Guardar ventas nuevas PRIMERO
-        print(f"\n💾 Guardando {len(new_sales)} ventas nuevas...")
-        save_new_sales(new_sales)
+        if new_sales:
+            print(f"\n💾 Guardando {len(new_sales)} ventas nuevas...")
+            save_new_sales(new_sales)
 
-        # 6) Esperar un momento para asegurar consistencia
-        time.sleep(2)
+            time.sleep(2)
 
-        # 7) Actualizar reportes de clientes afectados
-        print(f"\n📊 Actualizando reportes de clientes...")
-        update_client_reports(contacts, new_sales)
-    else:
-        print("ℹ️  No hay ventas nuevas para procesar")
+            print(f"\n📊 Actualizando reportes de clientes...")
+            update_client_reports(contacts, new_sales)
+        else:
+            print("ℹ️  No hay ventas nuevas para procesar")
 
-    # 8) Actualizar estado
-    save_state(datetime.now(LOCAL_TZ).date())
+        save_state(datetime.now(LOCAL_TZ).date())
 
-    print(f"\n✅ Proceso completado")
-    print(f"   • {len(new_sales)} ventas nuevas procesadas")
-    print(f"   • Filtro temporal: {MAX_MONTHS_WITHOUT_PURCHASE} meses máximo")
+        print(f"\n✅ Proceso incremental completado")
+        print(f"   • {len(new_sales)} ventas nuevas procesadas")
+        print(f"   • Filtro temporal: {MAX_MONTHS_WITHOUT_PURCHASE} meses máximo")
 
 if __name__ == "__main__":
     main()
