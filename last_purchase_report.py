@@ -65,9 +65,12 @@ def truncate_tables():
     """Truncar tablas para rebuild completo"""
     try:
         supabase = get_supabase_client()
-        supabase.table("sales_processed").delete().neq("id", "").execute()
-        supabase.table("clients_last_purchase").delete().neq("id", "").execute()
-        supabase.table("sync_state").delete().neq("id", "").execute()
+        for table in (
+            "sales_processed",
+            "clients_last_purchase",
+            "sync_state",
+        ):
+            supabase.table(table).delete().neq("id", 0).execute()
     except Exception as e:
         print(f"Error en truncate: {e}")
         raise
