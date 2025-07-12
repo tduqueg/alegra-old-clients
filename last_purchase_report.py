@@ -280,24 +280,28 @@ def fetch_new_sales(since: date | None):
     return sales
 
 def get_last_purchases_from_db():
-    """Obtener últimas compras desde la base de datos"""
+    """Obtener últimas compras desde la base de datos, asegurando fechas más recientes"""
     try:
         supabase = get_supabase_client()
+        
+        # Consulta optimizada para obtener la fecha más reciente por cliente
         result = supabase.table("sales_processed").select(
             "client_id, sale_date, price_list_id"
-        ).order("sale_date", desc=True).execute()
+        ).order("client_id", desc=False).order("sale_date", desc=True).execute()
         
         last_purchases = {}
         for row in result.data:
             client_id = int(row["client_id"])
             sale_date = row["sale_date"]
             
-            if client_id not in last_purchases or sale_date > last_purchases[client_id]["date"]:
+            # Solo tomar la primera ocurrencia (más reciente) por cliente
+            if client_id not in last_purchases:
                 last_purchases[client_id] = {
                     "date": sale_date,
                     "price_list_id": row["price_list_id"]
                 }
         
+        print(f"✓ Obtenidas últimas compras de {len(last_purchases)} clientes")
         return last_purchases
         
     except Exception as e:
@@ -354,35 +358,26 @@ def save_to_supabase(df):
         raise
 
 def update_client_reports(contacts, new_sales):
-    """Actualizar solo los reportes de clientes con ventas nuevas"""
+    """Actualizar reportes de clientes, recalculando desde todas las ventas"""
     
-    # Obtener todas las últimas compras desde la DB
+    # Obtener todas las últimas compras desde la DB (esto nos da el estado actualizado)
     all_last_purchases = get_last_purchases_from_db()
     
-    # Procesar solo ventas nuevas para actualizar últimas compras
-    for sale in new_sales:
-        client_id = sale["client_id"]
-        sale_date = sale["date"]
-        price_list_id = sale["price_list_id"]
-        
-        if client_id not in all_last_purchases or sale_date > all_last_purchases[client_id]["date"]:
-            all_last_purchases[client_id] = {
-                "date": sale_date,
-                "price_list_id": price_list_id
-            }
-    
-    # Construir reporte solo para clientes afectados
-    today = datetime.now(LOCAL_TZ).date()
+    # Identificar clientes que tuvieron ventas nuevas
     updated_clients = set(sale["client_id"] for sale in new_sales)
     
-    # También incluir todos los clientes existentes para recalcular filtros
-    all_clients_with_purchases = set(all_last_purchases.keys())
-    clients_to_process = updated_clients.union(all_clients_with_purchases)
+    if not updated_clients:
+        print("ℹ️  No hay clientes para actualizar")
+        return
     
+    # Construir reporte solo para clientes con ventas nuevas
+    today = datetime.now(LOCAL_TZ).date()
     rows = []
     filtered_out_count = 0
     
-    for client_id in clients_to_process:
+    print(f"🔄 Recalculando reportes para {len(updated_clients)} clientes afectados...")
+    
+    for client_id in updated_clients:
         if client_id not in all_last_purchases:
             continue
             
@@ -399,6 +394,7 @@ def update_client_reports(contacts, new_sales):
             continue
         
         last_dt = datetime.fromisoformat(purchase_info["date"]).date()
+        days_without_purchase = (today - last_dt).days
         
         # Filtrar por timeframe (solo incluir clientes que compraron en los últimos X meses)
         if not is_within_timeframe(last_dt):
@@ -414,8 +410,12 @@ def update_client_reports(contacts, new_sales):
             "categoria": categoria,
             "lista_precio_id": price_id,
             "fecha_ultima_compra": last_dt,
-            "dias_sin_compra": (today - last_dt).days,
+            "dias_sin_compra": days_without_purchase,
         })
+        
+        # Debug: mostrar algunos casos para verificar
+        if len(rows) <= 3:
+            print(f"  🔍 Cliente {contact_info.get('name', 'N/A')}: última compra {last_dt}, días sin compra: {days_without_purchase}")
     
     if rows:
         df_updated = pd.DataFrame(rows)
@@ -423,7 +423,7 @@ def update_client_reports(contacts, new_sales):
         print(f"✅ Actualizados {len(rows)} clientes")
         print(f"🔍 Filtrados {filtered_out_count} clientes con más de {MAX_MONTHS_WITHOUT_PURCHASE} meses sin compras")
     else:
-        print("ℹ️  No hay clientes para actualizar")
+        print("ℹ️  No hay clientes elegibles para actualizar")
 
 # ---------------------------------------------------------------- main —
 
@@ -450,16 +450,20 @@ def main():
     new_sales = fetch_new_sales(since)
 
     if new_sales:
-        # 4) Guardar ventas nuevas
+        # 4) Guardar ventas nuevas PRIMERO
+        print(f"\n💾 Guardando {len(new_sales)} ventas nuevas...")
         save_new_sales(new_sales)
         
-        # 5) Actualizar reportes de clientes afectados
+        # 5) Esperar un momento para asegurar consistencia
+        time.sleep(2)
+        
+        # 6) Actualizar reportes de clientes afectados
         print(f"\n📊 Actualizando reportes de clientes...")
         update_client_reports(contacts, new_sales)
     else:
         print("ℹ️  No hay ventas nuevas para procesar")
 
-    # 6) Actualizar estado
+    # 7) Actualizar estado
     save_state(datetime.now(LOCAL_TZ).date())
 
     print(f"\n✅ Proceso completado")
