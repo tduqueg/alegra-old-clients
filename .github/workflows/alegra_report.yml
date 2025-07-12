@@ -10,6 +10,10 @@ on:
         description: 'Modo testing (true/false)'
         required: false
         default: 'false'
+      rebuild_mode:
+        description: 'Rebuild completo (true/false)'
+        required: false
+        default: 'true'
       max_items:
         description: 'Máximo registros en test (ventas)'
         required: false
@@ -29,8 +33,9 @@ jobs:
       # Supabase
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-      # Testing
+      # Control
       TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+      REBUILD_MODE: ${{ github.event.inputs.rebuild_mode || 'false' }}
       TEST_MAX_ITEMS: ${{ github.event.inputs.max_items || '100' }}
       TEST_MAX_CONTACTS: ${{ github.event.inputs.max_contacts || '500' }}
       
