@@ -367,28 +367,24 @@ def update_client_locations(contacts):
             print("ℹ️  No hay clientes existentes para actualizar ubicación")
             return
 
-        records = []
+        updated_count = 0
         for row in result.data:
             cid = row["cliente_id"]
             info = contacts.get(int(cid)) or contacts.get(cid)
             if not info:
                 continue
-            records.append({
-                "cliente_id": str(cid),
+
+            # Solo actualizamos las ubicaciones para evitar inserciones
+            supabase.table("clients_last_purchase").update({
                 "cliente_ciudad": info.get("city", ""),
                 "cliente_estado": info.get("state", "")
-            })
+            }).eq("cliente_id", str(cid)).execute()
+            updated_count += 1
 
-        if not records:
+        if updated_count:
+            print(f"✓ Actualizadas ubicaciones de {updated_count} clientes")
+        else:
             print("ℹ️  Ninguna ubicación de cliente para actualizar")
-            return
-
-        batch_size = 100
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
-
-        print(f"✓ Actualizadas ubicaciones de {len(records)} clientes")
 
     except Exception as e:
         print(f"Error actualizando ubicaciones: {e}")
