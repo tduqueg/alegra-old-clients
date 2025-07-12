@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Versión optimizada que solo procesa ventas nuevas
+Versión optimizada con filtros de ubicación y tiempo
 """
 
 import os, json, requests, pandas as pd
@@ -19,6 +19,13 @@ CONFIG = json.load(open("price_lists_config.json", encoding="utf8"))
 
 DISTRIBUTOR_SET = set(CONFIG["distributor_lists"])
 MAYORISTA_SET = set(CONFIG["mayorista_lists"])
+
+# Configuración de filtros
+MAX_MONTHS_WITHOUT_PURCHASE = 6  # Máximo 6 meses sin compras
+LOCATIONS_TO_TRACK = [
+    "Bogotá", "Medellín", "Cali", "Barranquilla", "Cartagena",
+    "Bucaramanga", "Pereira", "Manizales", "Ibagué", "Neiva"
+]  # Puedes ajustar según tus necesidades
 
 # Configuración de Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -160,8 +167,30 @@ def save_new_sales(sales_list):
 
 # ------------------------------------------------------------- extracción —
 
+def extract_location_info(contact_data):
+    """Extraer información de ubicación del contacto"""
+    city = ""
+    state = ""
+    
+    # Verificar si hay información de dirección
+    if "address" in contact_data and contact_data["address"]:
+        address = contact_data["address"]
+        city = address.get("city", "")
+        state = address.get("state", "")
+    
+    # También verificar campos directos
+    if not city and "city" in contact_data:
+        city = contact_data.get("city", "")
+    if not state and "state" in contact_data:
+        state = contact_data.get("state", "")
+    
+    return {
+        "city": city.strip() if city else "",
+        "state": state.strip() if state else ""
+    }
+
 def fetch_contacts():
-    """Obtiene todos los contactos con sus price lists"""
+    """Obtiene todos los contactos con sus price lists y ubicación"""
     contacts = {}
     contact_count = 0
     
@@ -172,10 +201,15 @@ def fetch_contacts():
         price_list = c.get("priceList") or {}
         price_id = str(price_list.get("id", "")) if price_list.get("id") is not None else None
         
+        # Extraer información de ubicación
+        location = extract_location_info(c)
+        
         contacts[cid] = {
             "price_id": price_id,
             "name": c.get("name", ""),
-            "email": c.get("email", "")
+            "email": c.get("email", ""),
+            "city": location["city"],
+            "state": location["state"]
         }
     
     print(f"✓ Obtenidos {contact_count} contactos")
@@ -183,11 +217,9 @@ def fetch_contacts():
 
 def fetch_new_sales(since: date | None):
     """Obtiene solo las ventas nuevas"""
-    # Obtener IDs de ventas ya procesadas
     existing_ids = get_existing_sales_ids()
     print(f"✓ {len(existing_ids)} ventas ya procesadas")
     
-    # Usar diccionario para evitar duplicados desde el inicio
     sales_dict = {}
     new_count = 0
     
@@ -200,7 +232,6 @@ def fetch_new_sales(since: date | None):
     for inv in paginate("invoices", params=params):
         sale_key = f"{inv['id']}_invoice"
         
-        # Solo procesar si es nueva y no duplicada
         if sale_key not in existing_ids and sale_key not in sales_dict:
             client_id = inv["client"]["id"]
             
@@ -225,7 +256,6 @@ def fetch_new_sales(since: date | None):
     for rem in paginate("remissions", params=params):
         sale_key = f"{rem['id']}_remission"
         
-        # Solo procesar si es nueva y no duplicada
         if sale_key not in existing_ids and sale_key not in sales_dict:
             client_id = rem["client"]["id"]
             
@@ -283,6 +313,12 @@ def category_from_price(price_id: str | None):
         return "Mayoristas"
     return None
 
+def is_within_timeframe(last_purchase_date: date, max_months: int = MAX_MONTHS_WITHOUT_PURCHASE):
+    """Verificar si la última compra está dentro del timeframe relevante"""
+    today = datetime.now(LOCAL_TZ).date()
+    cutoff_date = today - timedelta(days=max_months * 30)
+    return last_purchase_date >= cutoff_date
+
 # ----------------------------------------------------- construcción DF —
 
 def save_to_supabase(df):
@@ -339,8 +375,14 @@ def update_client_reports(contacts, new_sales):
     today = datetime.now(LOCAL_TZ).date()
     updated_clients = set(sale["client_id"] for sale in new_sales)
     
+    # También incluir todos los clientes existentes para recalcular filtros
+    all_clients_with_purchases = set(all_last_purchases.keys())
+    clients_to_process = updated_clients.union(all_clients_with_purchases)
+    
     rows = []
-    for client_id in updated_clients:
+    filtered_out_count = 0
+    
+    for client_id in clients_to_process:
         if client_id not in all_last_purchases:
             continue
             
@@ -357,10 +399,18 @@ def update_client_reports(contacts, new_sales):
             continue
         
         last_dt = datetime.fromisoformat(purchase_info["date"]).date()
+        
+        # Filtrar por timeframe (solo incluir clientes que compraron en los últimos X meses)
+        if not is_within_timeframe(last_dt):
+            filtered_out_count += 1
+            continue
+        
         rows.append({
             "cliente_id": str(client_id),
             "cliente_nombre": contact_info.get("name", ""),
             "cliente_email": contact_info.get("email", ""),
+            "cliente_ciudad": contact_info.get("city", ""),
+            "cliente_estado": contact_info.get("state", ""),
             "categoria": categoria,
             "lista_precio_id": price_id,
             "fecha_ultima_compra": last_dt,
@@ -371,6 +421,7 @@ def update_client_reports(contacts, new_sales):
         df_updated = pd.DataFrame(rows)
         save_to_supabase(df_updated)
         print(f"✅ Actualizados {len(rows)} clientes")
+        print(f"🔍 Filtrados {filtered_out_count} clientes con más de {MAX_MONTHS_WITHOUT_PURCHASE} meses sin compras")
     else:
         print("ℹ️  No hay clientes para actualizar")
 
@@ -378,6 +429,7 @@ def update_client_reports(contacts, new_sales):
 
 def main():
     print("🚀 Iniciando reporte optimizado de Alegra...")
+    print(f"📅 Filtrando clientes con máximo {MAX_MONTHS_WITHOUT_PURCHASE} meses sin compras")
 
     # 1) Cargar estado
     state = load_state()
@@ -387,10 +439,10 @@ def main():
         print(f"📅 Procesando ventas desde: {since}")
     else:
         print("📅 Primera sincronización - procesando todas las ventas")
-        since = date(2020, 1, 1)  # Fecha muy antigua para obtener todo
+        since = date(2020, 1, 1)
 
-    # 2) Obtener contactos
-    print("\n📞 Obteniendo contactos...")
+    # 2) Obtener contactos con ubicación
+    print("\n📞 Obteniendo contactos con ubicación...")
     contacts = fetch_contacts()
 
     # 3) Obtener solo ventas nuevas
@@ -412,6 +464,7 @@ def main():
 
     print(f"\n✅ Proceso completado")
     print(f"   • {len(new_sales)} ventas nuevas procesadas")
+    print(f"   • Filtro temporal: {MAX_MONTHS_WITHOUT_PURCHASE} meses máximo")
 
 if __name__ == "__main__":
     main()
