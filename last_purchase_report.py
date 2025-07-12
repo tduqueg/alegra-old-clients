@@ -233,12 +233,12 @@ def fetch_new_sales(since: date | None):
         sale_key = f"{inv['id']}_invoice"
         
         if sale_key not in existing_ids and sale_key not in sales_dict:
-            client_id = inv["client"]["id"]
-            
+            client_id = int(inv["client"]["id"])
+
             price_list_id = None
             if "priceList" in inv and inv["priceList"]:
                 price_list_id = str(inv["priceList"]["id"])
-            
+
             sales_dict[sale_key] = {
                 "sale_id": inv["id"],
                 "client_id": client_id,
@@ -257,7 +257,7 @@ def fetch_new_sales(since: date | None):
         sale_key = f"{rem['id']}_remission"
         
         if sale_key not in existing_ids and sale_key not in sales_dict:
-            client_id = rem["client"]["id"]
+            client_id = int(rem["client"]["id"])
             
             price_list_id = None
             if "priceList" in rem and rem["priceList"]:
@@ -357,6 +357,42 @@ def save_to_supabase(df):
         print(f"❌ Error guardando en Supabase: {e}")
         raise
 
+def update_client_locations(contacts):
+    """Sincronizar ciudad y estado para los clientes existentes."""
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("clients_last_purchase").select("cliente_id").execute()
+
+        if not result.data:
+            print("ℹ️  No hay clientes existentes para actualizar ubicación")
+            return
+
+        records = []
+        for row in result.data:
+            cid = row["cliente_id"]
+            info = contacts.get(int(cid)) or contacts.get(cid)
+            if not info:
+                continue
+            records.append({
+                "cliente_id": str(cid),
+                "cliente_ciudad": info.get("city", ""),
+                "cliente_estado": info.get("state", "")
+            })
+
+        if not records:
+            print("ℹ️  Ninguna ubicación de cliente para actualizar")
+            return
+
+        batch_size = 100
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            supabase.table("clients_last_purchase").upsert(batch, on_conflict="cliente_id").execute()
+
+        print(f"✓ Actualizadas ubicaciones de {len(records)} clientes")
+
+    except Exception as e:
+        print(f"Error actualizando ubicaciones: {e}")
+
 def update_client_reports(contacts, new_sales):
     """Actualizar reportes de clientes, recalculando desde todas las ventas"""
     
@@ -445,25 +481,29 @@ def main():
     print("\n📞 Obteniendo contactos con ubicación...")
     contacts = fetch_contacts()
 
-    # 3) Obtener solo ventas nuevas
+    # 3) Sincronizar ubicaciones con la base de datos
+    print("\n📍 Actualizando ubicaciones de clientes existentes...")
+    update_client_locations(contacts)
+
+    # 4) Obtener solo ventas nuevas
     print(f"\n🛒 Obteniendo ventas nuevas...")
     new_sales = fetch_new_sales(since)
 
     if new_sales:
-        # 4) Guardar ventas nuevas PRIMERO
+        # 5) Guardar ventas nuevas PRIMERO
         print(f"\n💾 Guardando {len(new_sales)} ventas nuevas...")
         save_new_sales(new_sales)
-        
-        # 5) Esperar un momento para asegurar consistencia
+
+        # 6) Esperar un momento para asegurar consistencia
         time.sleep(2)
-        
-        # 6) Actualizar reportes de clientes afectados
+
+        # 7) Actualizar reportes de clientes afectados
         print(f"\n📊 Actualizando reportes de clientes...")
         update_client_reports(contacts, new_sales)
     else:
         print("ℹ️  No hay ventas nuevas para procesar")
 
-    # 7) Actualizar estado
+    # 8) Actualizar estado
     save_state(datetime.now(LOCAL_TZ).date())
 
     print(f"\n✅ Proceso completado")
