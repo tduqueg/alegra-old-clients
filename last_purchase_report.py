@@ -70,7 +70,7 @@ def truncate_tables():
             "clients_last_purchase",
             "sync_state",
         ):
-            supabase.table(table).delete().gt("id", 0).execute()
+            supabase.table(table).delete().neq("id", 0).execute()
     except Exception as e:
         print(f"Error en truncate: {e}")
         raise
