@@ -65,9 +65,12 @@ def truncate_tables():
     """Truncar tablas para rebuild completo"""
     try:
         supabase = get_supabase_client()
-        supabase.table("sales_processed").delete().neq("id", "").execute()
-        supabase.table("clients_last_purchase").delete().neq("id", "").execute()
-        supabase.table("sync_state").delete().neq("id", "").execute()
+        for table in (
+            "sales_processed",
+            "clients_last_purchase",
+            "sync_state",
+        ):
+            supabase.table(table).delete().gt("id", 0).execute()
     except Exception as e:
         print(f"Error en truncate: {e}")
         raise
@@ -154,7 +157,7 @@ def fetch_contacts():
     contacts = {}
     
     for c in paginate("contacts"):
-        cid = c["id"]
+        cid = int(c["id"])
         price_list = c.get("priceList") or {}
         price_id = str(price_list.get("id", "")) if price_list.get("id") is not None else None
         location = extract_location_info(c)
