@@ -13,7 +13,7 @@ CONFIG = json.load(open("price_lists_config.json", encoding="utf8"))
 
 DISTRIBUTOR_SET = set(CONFIG["distributor_lists"])
 MAYORISTA_SET = set(CONFIG["mayorista_lists"])
-MAX_MONTHS_WITHOUT_PURCHASE = 6
+MAX_MONTHS_WITHOUT_PURCHASE = 12
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
