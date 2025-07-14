@@ -157,7 +157,7 @@ def fetch_contacts():
     contacts = {}
     
     for c in paginate("contacts"):
-        cid = c["id"]
+        cid = int(c["id"])
         price_list = c.get("priceList") or {}
         price_id = str(price_list.get("id", "")) if price_list.get("id") is not None else None
         location = extract_location_info(c)
